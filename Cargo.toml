@@ -5,3 +5,8 @@ authors = ["Clifford T. Matthews <ctm@devctm.com>"]
 edition = "2018"
 
 [dependencies]
+actix = "0.7"
+actix-web = { version = "0.7", features = ["alpn"] }
+acme-client = { version = "0.5", default-features = false }
+openssl = "0.10"
+chrono = "0.4"

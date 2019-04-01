@@ -22,7 +22,7 @@
 //! // to use a certificate you must have DNS pointing a domain to the host
 //! // you're running this on.
 //! #![feature(proc_macro_hygiene)]
-//! 
+//!
 //! use {
 //!     actix_web::{
 //!         actix::Actor, http::Method, server, App,
@@ -30,19 +30,19 @@
 //!     },
 //!     actix_web_lets_encrypt::{CertBuilder, LetsEncrypt},
 //! };
-//! 
+//!
 //! // ... asset and other non-certificate code elided ...
-//! 
+//!
 //! fn main() {
 //!     let example_prod = CertBuilder::new("0.0.0.0:8089", &["example.com"]).email("ctm@example.com");
-//! 
+//!
 //!     let two_certs_prod =
 //!         CertBuilder::new("0.0.0.0:8090", &["example.org", "example.net"]).email("ctm@example.org");
-//! 
+//!
 //!     let example_test = CertBuilder::new("0.0.0.0:8091", &["test.example.com"])
 //!         .email("ctm@example.com")
 //!         .test();
-//! 
+//!
 //!     // 8088 is for all http and is bound after we set up the server.
 //!     let app_encryption_enabler = LetsEncrypt::encryption_enabler()
 //!         .nonce_directory("/var/nonce")
@@ -50,9 +50,9 @@
 //!         .add_cert(example_prod)
 //!         .add_cert(two_certs_prod)
 //!         .add_cert(example_test);
-//! 
+//!
 //!     let server_encryption_enabler = app_encryption_enabler.clone();
-//! 
+//!
 //!     let mut server = server::new(move || {
 //!         App::new().configure(|app| {
 //!             let app = app
@@ -61,7 +61,7 @@
 //!             app_encryption_enabler.register(app)
 //!         })
 //!     });
-//! 
+//!
 //!     server = server_encryption_enabler
 //!                  .attach_certificates_to(server)
 //!                  .bind("0.0.0.0:8088")
@@ -71,6 +71,8 @@
 //!     server.run();
 //! }
 //! ```
+
+// #![deny(missing_docs)]
 
 use {
     acme_client::{error::Error, Directory},
@@ -82,29 +84,49 @@ use {
         server::{HttpServer, IntoHttpHandler},
         App, HttpRequest,
     },
-    chrono::{offset::TimeZone, Duration, Utc},
+    chrono::{offset::TimeZone, Utc},
     openssl::{
         ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod},
         x509::X509,
     },
     std::{
+        env,
+        ffi::OsStr,
+        fmt::Display,
         fs::{self, File},
         io::Read,
         net::{SocketAddr, ToSocketAddrs},
         path::{Path, PathBuf},
         str::FromStr,
+        time::Duration,
     },
 };
 
-#[derive(Clone)]
+const SECS_IN_MINUTE: u64 = 60;
+const SECS_IN_HOUR: u64 = SECS_IN_MINUTE * 60;
+const SECS_IN_DAY: u64 = SECS_IN_HOUR * 24;
+
+#[derive(Clone, Deserialize)]
 pub struct CertBuilder {
-    addrs: Vec<SocketAddr>,
-    domains: Vec<String>,
+    addrs: Vec<SocketAddr>, // required
+    domains: Vec<String>,   // required
+
+    #[serde(default)]
     email: Option<String>,
+
+    #[serde(default = "CertBuilder::default_production")]
     production: bool,
+
+    #[serde(default = "CertBuilder::default_renew_within")]
     renew_within: Duration,
+
+    #[serde(default = "CertBuilder::default_check_every")]
     check_every: std::time::Duration,
+
+    #[serde(default)]
     key_path: Option<PathBuf>,
+
+    #[serde(default)]
     cert_path: Option<PathBuf>,
 }
 
@@ -116,19 +138,29 @@ impl CertBuilder {
     {
         let addrs = addrs.to_socket_addrs().unwrap().collect();
         let domains = domains.iter().map(|d| d.as_ref().to_string()).collect();
-        let renew_within = Duration::days(30);
-        let check_every = Duration::hours(12).to_std().unwrap();
 
         CertBuilder {
             addrs,
             domains,
             email: None,
-            production: true,
-            renew_within,
-            check_every,
+            production: Self::default_production(),
+            renew_within: Self::default_renew_within(),
+            check_every: Self::default_check_every(),
             key_path: None,
             cert_path: None,
         }
+    }
+
+    fn default_production() -> bool {
+        true
+    }
+
+    fn default_renew_within() -> Duration {
+        Duration::new(30 * SECS_IN_DAY, 0)
+    }
+
+    fn default_check_every() -> Duration {
+        Duration::new(12 * SECS_IN_HOUR, 0)
     }
 
     pub fn email<E: AsRef<str>>(mut self, email: E) -> Self {
@@ -147,7 +179,7 @@ impl CertBuilder {
     }
 
     pub fn check_every(mut self, period: &Duration) -> Self {
-        self.check_every = period.to_std().unwrap();
+        self.check_every = *period;
         self
     }
 
@@ -218,27 +250,72 @@ impl CertBuilder {
             .datetime_from_str(&not_after, "%b %d %H:%M:%S %Y GMT")
             .unwrap();
         let time_remaining = not_after.signed_duration_since(Utc::now());
-        time_remaining < self.renew_within
+        time_remaining.to_std().unwrap() < self.renew_within
     }
 }
 
-#[derive(Clone)]
+use serde::Deserialize;
+
+#[derive(Clone, Deserialize)]
 pub struct LetsEncrypt {
+    #[serde(default = "LetsEncrypt::default_nonce_directory")]
     nonce_directory: PathBuf,
+    #[serde(default = "LetsEncrypt::default_ssl_directory")]
     ssl_directory: PathBuf,
     cert_builders: Vec<CertBuilder>,
 }
 
 impl LetsEncrypt {
     pub fn encryption_enabler() -> Self {
-        const DEFAULT_NONCE_DIRECTORY: &str = "/var/tmp/lets_encrypt";
-        const DEFAULT_SSL_DIRECTORY: &str = "/ssl";
-
         Self {
-            nonce_directory: PathBuf::from(DEFAULT_NONCE_DIRECTORY),
-            ssl_directory: PathBuf::from(DEFAULT_SSL_DIRECTORY),
+            nonce_directory: Self::default_nonce_directory(),
+            ssl_directory: Self::default_ssl_directory(),
             cert_builders: Vec::new(),
         }
+    }
+
+    /// Factory with configuration coming from an environment variable
+    ///
+    /// # Arguments
+    ///
+    /// * `env_var` - The name of the environment variable whose value is a
+    ///               JSON encoded CertBuilder
+    ///
+    /// # Example
+    ///
+    /// `SIMPLE_CONFIG='{"cert_builders":[]}'`
+    /// `COMPLEX_CONFIG='{"nonce_directory":"/var/nonce","ssl_directory":"ssl","cert_builders":[{"addrs":["0.0.0.0:8089"],"domains":["example.com"],"email":"ctm@example.com"},{"addrs":["0.0.0.0:8090"],"domains":["example.org","example.net"],"email":"ctm@example.org"},{"addrs":["0.0.0.0:8091"],"domains":["test.example.com"],"email":"ctm@example.com","production":false}]}'`
+    ///
+    /// ```rust
+    ///     let app_encryption_enabler = LetsEncrypt::encryption_enabler_from_env("SIMPLE_CONFIG");
+    ///
+    /// ```
+    pub fn encryption_enabler_from_env<K: AsRef<OsStr> + Display>(env_var: K) -> Self {
+        match env::var(&env_var) {
+            Err(e) => panic!("{}: {}", env_var, e),
+            Ok(config) => {
+                let mut enabler: LetsEncrypt = serde_json::from_str(&config)
+                    .unwrap_or_else(|_| panic!("Can't parse {}", env_var));
+
+                // Although we have the cert builders, we still have to
+                // add them to the enabler so that the paths will get
+                // set up properly.  This code smells bad.
+
+                for cert in enabler.cert_builders.split_off(0) {
+                    enabler = enabler.add_cert(cert);
+                }
+
+                enabler
+            }
+        }
+    }
+
+    fn default_nonce_directory() -> PathBuf {
+        PathBuf::from("/var/tmp/lets_encrypt")
+    }
+
+    fn default_ssl_directory() -> PathBuf {
+        PathBuf::from("/ssl")
     }
 
     pub fn nonce_directory<P>(mut self, path: P) -> Self

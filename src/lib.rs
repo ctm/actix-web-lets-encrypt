@@ -408,7 +408,9 @@ impl LetsEncrypt {
 
     fn cert_built(&self, cert_builder: &CertBuilder) -> bool {
         if cert_builder.needs_building() {
-            self.build_cert(cert_builder).expect("could create cert");
+            self
+                .build_cert(cert_builder)
+                .unwrap_or_else(|e| panic!("could not create cert: {}", e));
             true
         } else {
             false
